@@ -207,6 +207,10 @@ except Exception:
 explainer = shap.LinearExplainer(model, background, feature_perturbation="interventional")
 
 
+@app.route("/")
+def home():
+    return "✅ Flask server is running successfully!"
+
 # ── Route ─────────────────────────────────────────────────────────── #
 @app.route("/predict", methods=["POST"])
 def predict():
