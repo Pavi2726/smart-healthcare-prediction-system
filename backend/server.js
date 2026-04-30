@@ -18,6 +18,7 @@ const db = mysql.createConnection({
 });
 
 const JWT_SECRET = process.env.JWT_SECRET || "change_me_in_env";
+const ML_SERVICE_URL = process.env.ML_SERVICE_URL;
 
 function authenticateToken(req, res, next) {
   const authHeader = req.headers.authorization;
@@ -175,7 +176,11 @@ app.post("/auth/login", (req, res) => {
 
 app.post("/predict", async (req, res) => {
   try {
-    const flaskRes = await axios.post("http://127.0.0.1:5000/predict", req.body);
+    if (!ML_SERVICE_URL) {
+      return res.status(500).json({ error: "ML_SERVICE_URL is not configured" });
+    }
+
+    const flaskRes = await axios.post(`${ML_SERVICE_URL}/predict`, req.body);
     const result = flaskRes.data;
 
     const inputValues = [

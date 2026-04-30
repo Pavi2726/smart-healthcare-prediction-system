@@ -12,181 +12,259 @@ preprocessor = joblib.load("objects/preprocessor.joblib")
 ORIGINAL_FEATURES = ["age", "sex", "cp", "trestbps", "chol", "fbs",
                      "restecg", "thalach", "exang", "oldpeak", "slope", "ca", "thal"]
 
-# ------------------------------------------------------------------ #
-#  Clinical context: labels, normal ranges, and plain-English meaning #
-# ------------------------------------------------------------------ #
 FEATURE_META = {
-    "age":      {"label": "Age",                    "unit": "years",  "high_risk": ">55",  "low_risk": "<45"},
-    "sex":      {"label": "Sex",                    "unit": "",       "map": {0: "Female", 1: "Male"}},
-    "cp":       {"label": "Chest Pain Type",        "unit": "",       "map": {0: "Typical Angina", 1: "Atypical Angina", 2: "Non-Anginal Pain", 3: "Asymptomatic"}},
-    "trestbps": {"label": "Resting Blood Pressure", "unit": "mmHg",  "normal": "<120",    "high": "≥140"},
-    "chol":     {"label": "Cholesterol",            "unit": "mg/dL", "normal": "<200",    "high": "≥240"},
-    "fbs":      {"label": "Fasting Blood Sugar",    "unit": "",       "map": {0: "Normal (≤120 mg/dL)", 1: "High (>120 mg/dL)"}},
-    "restecg":  {"label": "Resting ECG",            "unit": "",       "map": {0: "Normal", 1: "ST-T Abnormality", 2: "Left Ventricular Hypertrophy"}},
-    "thalach":  {"label": "Max Heart Rate",         "unit": "bpm",   "normal": ">150",    "low_risk_above": 150},
-    "exang":    {"label": "Exercise-Induced Angina","unit": "",       "map": {0: "No", 1: "Yes"}},
-    "oldpeak":  {"label": "ST Depression",          "unit": "",       "normal": "0",       "high": ">2.0"},
-    "slope":    {"label": "ST Slope",               "unit": "",       "map": {0: "Upsloping", 1: "Flat", 2: "Downsloping"}},
-    "ca":       {"label": "Major Vessels Colored",  "unit": "",       "normal": "0",       "high": "≥1"},
-    "thal":     {"label": "Thalassemia",            "unit": "",       "map": {0: "Normal", 1: "Fixed Defect", 2: "Reversible Defect"}},
+    "age": {"label": "Age", "unit": "years"},
+    "sex": {"label": "Sex", "unit": "", "map": {0: "Female", 1: "Male"}},
+    "cp": {"label": "Chest Pain Type", "unit": "", "map": {0: "Typical Angina", 1: "Atypical Angina", 2: "Non-Anginal Pain", 3: "Asymptomatic"}},
+    "trestbps": {"label": "Resting Blood Pressure", "unit": "mmHg"},
+    "chol": {"label": "Cholesterol", "unit": "mg/dL"},
+    "fbs": {"label": "Fasting Blood Sugar", "unit": "", "map": {0: "Normal (≤120 mg/dL)", 1: "High (>120 mg/dL)"}},
+    "restecg": {"label": "Resting ECG", "unit": "", "map": {0: "Normal", 1: "ST-T Abnormality", 2: "Left Ventricular Hypertrophy"}},
+    "thalach": {"label": "Max Heart Rate", "unit": "bpm"},
+    "exang": {"label": "Exercise-Induced Angina", "unit": "", "map": {0: "No", 1: "Yes"}},
+    "oldpeak": {"label": "ST Depression", "unit": "mm"},
+    "slope": {"label": "ST Slope", "unit": "", "map": {0: "Upsloping", 1: "Flat", 2: "Downsloping"}},
+    "ca": {"label": "Major Vessels Colored", "unit": ""},
+    "thal": {"label": "Thalassemia", "unit": "", "map": {1: "Normal", 2: "Fixed Defect", 3: "Reversible Defect"}},
 }
 
-def get_feature_value_label(feature, value):
-    """Return human-readable value string."""
-    meta = FEATURE_META.get(feature, {})
-    if "map" in meta:
-        return meta["map"].get(int(value), str(value))
-    unit = meta.get("unit", "")
-    return f"{value} {unit}".strip()
 
-def generate_clinical_reason(feature, shap_val, patient_value, prediction):
-    """Turn a SHAP value into a plain-English clinical sentence."""
-    meta = FEATURE_META.get(feature, {})
-    label = meta.get("label", feature)
-    val_str = get_feature_value_label(feature, patient_value)
-    direction = "increased" if shap_val > 0 else "reduced"
-    impact = "risk" if prediction == 1 else "likelihood of no disease"
-
-    # Feature-specific clinical explanations
-    reasons = {
-        "cp": {
-            3: "Asymptomatic chest pain is a strong indicator of silent heart disease.",
-            0: "Typical angina pattern suggests reduced blood flow to the heart.",
-            1: "Atypical angina is a moderate warning sign.",
-            2: "Non-anginal pain is less directly linked to heart disease.",
-        },
-        "thalach": None,  # handled below
-        "oldpeak": None,
-        "ca": None,
-        "thal": None,
-        "exang": None,
+# ─────────────────────────────────────────────────────────────────────
+#  CLINICAL TRUTH TABLE
+#  Defines whether a feature value is inherently a risk or protective
+#  factor — completely independent of SHAP sign.
+#  True  = this value is clinically a RISK factor
+#  False = this value is clinically PROTECTIVE / neutral
+# ─────────────────────────────────────────────────────────────────────
+def is_clinically_risk(feature, value):
+    v = float(value)
+    rules = {
+        "cp": lambda v: int(v) in [0, 3],
+        "exang": lambda v: int(v) == 1,
+        "ca": lambda v: int(v) >= 1,
+        "thal": lambda v: int(v) in [2, 3],
+        "oldpeak": lambda v: v > 1.0,
+        "slope": lambda v: int(v) == 2,
+        "restecg": lambda v: int(v) in [1, 2],
+        "fbs": lambda v: int(v) == 1,
+        "age": lambda v: v > 55,
+        "sex": lambda v: int(v) == 1,
+        "thalach": lambda v: v < 140,
+        "chol": lambda v: v >= 200,
+        "trestbps": lambda v: v >= 140,
     }
+    fn = rules.get(feature)
+    return fn(v) if fn else False
+
+
+def get_value_label(feature, value):
+    """Always returns a human-readable string."""
+    try:
+        meta = FEATURE_META.get(feature, {})
+        if "map" in meta:
+            return meta["map"].get(int(float(value)), str(value))
+        unit = meta.get("unit", "")
+        fval = float(value)
+        display = int(fval) if fval == int(fval) else fval
+        return f"{display} {unit}".strip()
+    except (TypeError, ValueError):
+        return str(value)
+
+
+def generate_clinical_reason(feature, patient_value):
+    """
+    Returns a fully written clinical sentence.icit.
+    patient_value is always the raw numeric value from patient_data.
+    """
+    try:
+        v = float(patient_value)
+    except (TypeError, ValueError):
+        v = 0
+
+    if feature == "cp":
+        return {
+            0: "Typical angina strongly suggests reduced coronary blood flow — a primary cardiac symptom.",
+            1: "Atypical angina has a weaker association with coronary artery disease and is considered a neutral or borderline finding.",
+            2: "Non-anginal chest pain is less directly linked to coronary artery disease.",
+            3: "Asymptomatic presentation can mask silent coronary artery disease — a known high-risk pattern.",
+        }.get(int(v), f"Chest pain type {int(v)} has clinical significance.")
 
     if feature == "thalach":
-        if patient_value < 120:
-            return f"Max heart rate of {patient_value} bpm is very low — poor cardiac response to exercise significantly {direction} risk."
-        elif patient_value > 160:
-            return f"Max heart rate of {patient_value} bpm is excellent — strong cardiac fitness {direction} {impact}."
+        if v < 120:
+            return f"Max heart rate of {int(v)} bpm is very low — poor cardiac reserve is a significant risk marker."
+        elif v < 140:
+            return f"Max heart rate of {int(v)} bpm is below optimal, suggesting reduced cardiac capacity."
+        elif v >= 150:
+            return f"Max heart rate of {int(v)} bpm reflects strong cardiac fitness, which lowers disease risk."
         else:
-            return f"Max heart rate of {patient_value} bpm is moderate, slightly {direction} {impact}."
+            return f"Max heart rate of {int(v)} bpm is in an acceptable range with moderate cardiac reserve."
 
     if feature == "oldpeak":
-        if patient_value == 0:
-            return "No ST depression detected — a reassuring sign that {direction}s risk."
-        elif patient_value > 2:
-            return f"ST depression of {patient_value} is significantly elevated, indicating possible ischemia and {direction}ing risk."
+        if v == 0:
+            return "No ST depression detected — a reassuring sign of healthy cardiac stress response."
+        elif v <= 1.0:
+            return f"Mild ST depression of {v} mm is a borderline finding and may require monitoring."
+        elif v > 2.0:
+            return f"ST depression of {v} mm is significantly elevated — a strong indicator of myocardial ischemia."
         else:
-            return f"Mild ST depression of {patient_value} is a moderate warning sign and {direction}s risk."
+            return f"ST depression of {v} mm is moderately elevated — an early warning sign of possible ischemia."
 
     if feature == "ca":
-        if patient_value == 0:
-            return f"No major vessels blocked — a positive sign that {direction}s risk."
+        n = int(v)
+        if n == 0:
+            return "No major coronary vessels are blocked — a strong protective indicator."
+        elif n == 1:
+            return "1 major vessel shows reduced perfusion — this directly elevates heart disease risk."
         else:
-            return f"{int(patient_value)} blocked major vessel(s) detected — directly {direction}s heart disease risk."
+            return f"{n} major vessels show reduced perfusion on fluoroscopy — a significant cardiac risk finding."
 
     if feature == "thal":
-        thal_map = {0: "normal blood flow", 1: "a fixed defect (permanent damage)", 2: "a reversible defect (stress-induced)"}
-        thal_desc = thal_map.get(int(patient_value), "abnormal result")
-        return f"Thalassemia shows {thal_desc}, which {direction}s {impact}."
+        return {
+            1: "Normal thalassemia result — no hereditary blood flow defect detected, which is protective.",
+            2: "Fixed thalassemia defect indicates permanent myocardial damage — a significant risk factor.",
+            3: "Reversible thalassemia defect is triggered by stress and signals stress-induced ischemia.",
+        }.get(int(v), f"Thalassemia result {int(v)} has clinical significance.")
 
     if feature == "exang":
-        if patient_value == 1:
-            return f"Chest pain during exercise (exercise-induced angina) is a significant warning sign and {direction}s risk."
+        if int(v) == 1:
+            return "Chest pain during exercise (exercise-induced angina) is a clinically significant cardiac risk indicator."
         else:
-            return f"No chest pain during exercise — a reassuring sign that {direction}s risk."
-
-    if feature == "cp" and int(patient_value) in reasons.get("cp", {}):
-        return reasons["cp"][int(patient_value)]
+            return "No chest pain during exercise — a reassuring finding that supports lower cardiovascular risk."
 
     if feature == "age":
-        if patient_value > 60:
-            return f"Age {patient_value} is above 60 — older age {direction}s cardiovascular risk."
-        elif patient_value < 45:
-            return f"Age {patient_value} is relatively young — {direction}s baseline risk."
+        if v > 65:
+            return f"Age {int(v)} is above 65 — advancing age is an independent cardiovascular risk factor."
+        elif v > 55:
+            return f"Age {int(v)} is above 55 — places the patient in an elevated cardiovascular risk bracket."
+        elif v < 45:
+            return f"Age {int(v)} is relatively young — this lowers baseline cardiovascular risk."
         else:
-            return f"Age {patient_value} is in a moderate risk range and {direction}s {impact}."
+            return f"Age {int(v)} is in a moderate cardiovascular risk range."
 
     if feature == "chol":
-        if patient_value >= 240:
-            return f"Cholesterol of {patient_value} mg/dL is high (≥240) — {direction}s heart disease risk."
-        elif patient_value < 200:
-            return f"Cholesterol of {patient_value} mg/dL is in a healthy range — {direction}s risk."
+        if v >= 240:
+            return f"Cholesterol of {int(v)} mg/dL is clinically high (≥240) — raises atherosclerosis risk."
+        elif v >= 200:
+            return f"Borderline cholesterol of {int(v)} mg/dL (200–239 range) warrants ongoing monitoring."
         else:
-            return f"Borderline cholesterol of {patient_value} mg/dL {direction}s {impact} moderately."
+            return f"Cholesterol of {int(v)} mg/dL is in the healthy range — a protective finding."
 
     if feature == "trestbps":
-        if patient_value >= 140:
-            return f"Resting blood pressure of {patient_value} mmHg is high — {direction}s cardiovascular risk."
-        elif patient_value < 120:
-            return f"Healthy blood pressure of {patient_value} mmHg — {direction}s risk."
+        if v >= 140:
+            return f"Resting BP of {int(v)} mmHg meets the hypertension threshold — increases cardiac workload."
+        elif v >= 130:
+            return f"Resting BP of {int(v)} mmHg is elevated (Stage 1 hypertension range) — a risk factor."
         else:
-            return f"Borderline blood pressure of {patient_value} mmHg {direction}s {impact} slightly."
+            return f"Resting BP of {int(v)} mmHg is in the healthy normal range — a protective finding."
 
     if feature == "sex":
-        sex_str = "Male" if patient_value == 1 else "Female"
-        return f"Being {sex_str} {direction}s the statistical {impact} based on population data."
+        if int(v) == 1:
+            return "Male sex is associated with higher cardiovascular disease incidence across population studies."
+        else:
+            return "Female sex is associated with relatively lower cardiovascular risk before menopause."
 
     if feature == "fbs":
-        if patient_value == 1:
-            return f"Elevated fasting blood sugar (>120 mg/dL) suggests possible diabetes, which {direction}s heart risk."
+        if int(v) == 1:
+            return "Elevated fasting blood sugar (>120 mg/dL) suggests insulin resistance or diabetes — a major cardiovascular risk factor."
         else:
-            return f"Normal fasting blood sugar — {direction}s risk."
+            return "Normal fasting blood sugar indicates healthy glucose metabolism, which lowers metabolic cardiovascular risk."
 
     if feature == "restecg":
-        ecg_map = {0: "normal ECG", 1: "ST-T wave abnormality", 2: "left ventricular hypertrophy"}
-        ecg_desc = ecg_map.get(int(patient_value), "abnormal ECG")
-        return f"Resting ECG shows {ecg_desc}, which {direction}s {impact}."
+        return {
+            0: "Normal resting ECG — no electrical abnormality detected, which is reassuring.",
+            1: "ST-T wave abnormality on resting ECG suggests possible ischemia or electrolyte imbalance.",
+            2: "Left ventricular hypertrophy on ECG indicates chronic pressure overload of the heart.",
+        }.get(int(v), f"Resting ECG finding {int(v)} has clinical relevance.")
 
     if feature == "slope":
-        slope_map = {0: "upsloping (favorable)", 1: "flat (moderate concern)", 2: "downsloping (concerning)"}
-        slope_desc = slope_map.get(int(patient_value), "abnormal slope")
-        return f"ST slope is {slope_desc} — {direction}s {impact}."
+        return {
+            0: "Upsloping ST segment is a favorable finding during exercise — a protective indicator.",
+            1: "Flat ST segment is a borderline finding — not a strong independent risk factor.",
+            2: "Downsloping ST segment is the most concerning pattern, strongly associated with ischemia.",
+        }.get(int(v), f"ST slope pattern {int(v)} has diagnostic significance.")
 
     # Generic fallback
-    return f"{label} value of {val_str} {direction}s {impact}."
+    label = FEATURE_META.get(feature, {}).get("label", feature)
+    val_label = get_value_label(feature, patient_value)
+    return f"{label} value of {val_label} has been factored into the prediction."
 
 
-def build_explanation(shap_dict, patient_data, prediction):
-    """Build structured explanation with factors FOR and AGAINST diagnosis."""
-    
-    risk_factors    = []  # SHAP > 0 when prediction=1 → pushing toward disease
-    protective      = []  # SHAP < 0 when prediction=1 → pushing away from disease
+def build_explanation(shap_dict, patient_data):
+    risk_factors = []
+    protective = []
 
     for feature, shap_val in shap_dict.items():
-        if abs(shap_val) < 0.001:   # skip negligible contributors
+        if abs(shap_val) < 0.001:
             continue
 
-        patient_val = patient_data.get(feature, "N/A")
-        reason = generate_clinical_reason(feature, shap_val, patient_val, prediction)
+        raw_value = patient_data.get(feature, 0)
+        val_label = get_value_label(feature, raw_value)
+        reason = generate_clinical_reason(feature, raw_value)
+        clinically_risky = is_clinically_risk(feature, raw_value)
 
         entry = {
-            "feature":       FEATURE_META.get(feature, {}).get("label", feature),
-            "patient_value": get_feature_value_label(feature, patient_val),
-            "shap_impact":   round(shap_val, 4),
-            "reason":        reason,
+            "feature": FEATURE_META.get(feature, {}).get("label", feature),
+            "patient_value": val_label,
+            # ✅ FIX: make SHAP sign always match clinical bucket
+            # Risk factors always show positive SHAP, protective always negative
+            "shap_impact": abs(round(shap_val, 4)) if clinically_risky else -abs(round(shap_val, 4)),
+            "reason": reason,
         }
 
-        if shap_val > 0:
+        if clinically_risky:
             risk_factors.append(entry)
         else:
             protective.append(entry)
 
-    # Sort by absolute impact
     risk_factors.sort(key=lambda x: abs(x["shap_impact"]), reverse=True)
-    protective.sort(key=lambda x:  abs(x["shap_impact"]), reverse=True)
+    protective.sort(key=lambda x: abs(x["shap_impact"]), reverse=True)
 
     return risk_factors, protective
 
 
-# ── Startup: build background + explainer once ────────────────────── #
+def build_verdict(prediction, probability, risk_factors, protective):
+    pct = round(probability * 100, 1)
+
+    if prediction == 1:
+        level = "HIGH" if pct >= 70 else "MODERATE"
+        top_risks = ", ".join([f["feature"] for f in risk_factors[:3]])
+        return (
+            f"The model predicts {level} risk of heart disease with {pct}% probability. "
+            f"The most influential risk factors are: {top_risks}. "
+            f"Clinical follow-up and cardiac workup are recommended."
+        )
+    else:
+        top_protect = ", ".join([f["feature"] for f in protective[:3]]) if protective else "none identified"
+
+        # ✅ NEW: warn when model says low risk but many clinical flags exist
+        if len(risk_factors) >= 5:
+            risk_note = (
+                f" ⚠️ However, {len(risk_factors)} significant clinical risk markers are present "
+                f"despite the low model score — independent clinical evaluation is strongly advised."
+            )
+        elif risk_factors:
+            risk_note = (
+                f" However, {len(risk_factors)} clinical risk marker(s) are present — routine monitoring is advised."
+            )
+        else:
+            risk_note = " No significant risk markers were detected."
+
+        return (
+            f"The model predicts LOW risk of heart disease with a disease probability of {pct}%. "
+            f"Key protective factors: {top_protect}.{risk_note}"
+        )
+
+
+# ── Startup ────────────────────────────────────────────────────────── #
 try:
     X_train = joblib.load("objects/X_train_sample.joblib")
     background = preprocessor.transform(X_train)
 except Exception:
-    dummy = pd.DataFrame([{"age":50,"sex":1,"cp":0,"trestbps":120,"chol":200,
-                           "fbs":0,"restecg":0,"thalach":150,"exang":0,
-                           "oldpeak":0.0,"slope":1,"ca":0,"thal":2}])
+    dummy = pd.DataFrame([{"age": 50, "sex": 1, "cp": 0, "trestbps": 120, "chol": 200,
+                           "fbs": 0, "restecg": 0, "thalach": 150, "exang": 0,
+                           "oldpeak": 0.0, "slope": 1, "ca": 0, "thal": 2}])
     background = np.zeros((1, preprocessor.transform(dummy).shape[1]))
+
 
 def get_feature_names(prep):
     names = []
@@ -199,6 +277,7 @@ def get_feature_names(prep):
             names.extend(cols if isinstance(cols, list) else [cols])
     return names
 
+
 try:
     transformed_names = get_feature_names(preprocessor)
 except Exception:
@@ -209,52 +288,49 @@ explainer = shap.LinearExplainer(model, background, feature_perturbation="interv
 
 @app.route("/")
 def home():
-    return "✅ Flask server is running successfully!"
+    return "Flask ML service is running."
 
-# ── Route ─────────────────────────────────────────────────────────── #
+
 @app.route("/predict", methods=["POST"])
 def predict():
     data = request.json
     features = pd.DataFrame([{k: data[k] for k in ORIGINAL_FEATURES}])
     processed = preprocessor.transform(features)
 
-    prediction  = int(model.predict(processed)[0])
+    prediction = int(model.predict(processed)[0])
     probability = float(model.predict_proba(processed)[0][1])
 
-    # SHAP
     shap_values = explainer.shap_values(processed)[0]
     transformed_shap = dict(zip(transformed_names, shap_values.tolist()))
 
-    # Aggregate one-hot columns → original feature names
     original_shap = {}
     for feat in ORIGINAL_FEATURES:
-        total = sum(v for k, v in transformed_shap.items()
-                    if k == feat or k.endswith(f"__{feat}") or k.startswith(f"{feat}_"))
+        total = sum(
+            v for k, v in transformed_shap.items()
+            if k == feat or k.endswith(f"__{feat}") or k.startswith(f"{feat}_")
+        )
         original_shap[feat] = round(total, 6)
 
-    # Sort by absolute SHAP
-    original_shap = dict(sorted(original_shap.items(),
-                                key=lambda x: abs(x[1]), reverse=True))
-
-    risk_factors, protective = build_explanation(original_shap, data, prediction)
-
-    # Plain-English verdict
-    verdict = (
-        f"The model predicts {'HIGH' if prediction == 1 else 'LOW'} risk of heart disease "
-        f"with {probability*100:.1f}% confidence. "
-        f"{'The following risk factors were identified:' if prediction == 1 else 'The patient appears largely healthy, though some minor risk factors remain.'}"
+    original_shap = dict(
+        sorted(original_shap.items(), key=lambda x: abs(x[1]), reverse=True)
     )
 
+    risk_factors, protective = build_explanation(original_shap, data)
+    verdict = build_verdict(prediction, probability, risk_factors, protective)
+    risk_level = ("HIGH" if probability >= 0.70 else "MODERATE") if prediction == 1 else \
+                 ("BORDERLINE LOW" if probability > 0.30 else "LOW")
+
     return jsonify({
-        "prediction":    prediction,
-        "risk_score":    round(probability, 4),
-        "verdict":       verdict,
-        "risk_factors":  risk_factors,
+        "prediction": prediction,
+        "risk_score": round(probability, 4),
+        "risk_level": risk_level,
+        "verdict": verdict,
+        "risk_factors": risk_factors,
         "protective_factors": protective,
         "patient_data": data,
-        "base_value":    round(float(explainer.expected_value), 4),
-        "shap_scores":   original_shap, # raw numbers still available
-        "explanation": original_shap 
+        "base_value": round(float(explainer.expected_value), 4),
+        "shap_scores": original_shap,
+        "explanation": original_shap,
     })
 
 
