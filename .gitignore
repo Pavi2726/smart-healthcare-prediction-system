@@ -2,3 +2,12 @@ __pycache__/
 *.pyc
 node_modules/
 .env
+# Python virtual envs
+.venv/
+.venv311/
+venv/
+env/
+
+# Python cache
+__pycache__/
+*.pyc
